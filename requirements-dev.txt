@@ -1,0 +1,5 @@
+# Only for the unit tests; the server itself runs in the Docker image (see Dockerfile).
+# The CPU build of torch is enough: the GPU-only test is skipped without CUDA.
+torch==2.10.0
+pytest==9.0.2
+ruff==0.15.0
