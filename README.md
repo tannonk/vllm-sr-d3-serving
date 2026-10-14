@@ -185,5 +185,3 @@ ruff check .
   `opencv-python-headless`, which the image does not install.
 - Written against a runtime commit that is a day old at the time of writing; its CLI flags and internals can move.
 
-No licence file is included: add the one your organisation needs. The model (`vllm-sr/d3-*`) and the runtime are
-Apache-2.0 upstream.
