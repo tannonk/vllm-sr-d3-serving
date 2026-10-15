@@ -56,6 +56,15 @@ def test_switch_is_off_when_unset(launcher: ModuleType) -> None:
     assert launcher.switch_enabled({}, launcher.FUSED_KERNELS_VARIABLE) is False
 
 
+def test_unified_memory_is_on_when_unset_and_off_when_set_to_zero(launcher: ModuleType) -> None:
+    variable = launcher.UNIFIED_MEMORY_VARIABLE
+
+    assert launcher.switch_enabled({}, variable, default=True) is True
+    assert launcher.switch_enabled({variable: "1"}, variable, default=True) is True
+    assert launcher.switch_enabled({variable: "0"}, variable, default=True) is False
+    assert launcher.switch_enabled({variable: ""}, variable, default=True) is False
+
+
 def test_consent_sets_only_the_approximate_kernels_flag(launcher: ModuleType) -> None:
     spec = FakeSpec("d3-flash", FakePolicy())
 

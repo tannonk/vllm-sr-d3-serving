@@ -46,7 +46,7 @@ RUN MAX_JOBS=8 CAUSAL_CONV1D_FORCE_BUILD=TRUE TORCH_CUDA_ARCH_LIST="12.0" \
 ENV MIMALLOC_PURGE_DELAY=0
 
 # Runs `vllm-srun` unchanged unless a switch is set (see the launcher's docstring)
-COPY launcher/d3_launcher.py launcher/fp8_linear.py /opt/d3/
+COPY launcher/d3_launcher.py launcher/fp8_linear.py launcher/unified_memory.py /opt/d3/
 
 EXPOSE 8100
 ENTRYPOINT ["python", "/opt/d3/d3_launcher.py"]

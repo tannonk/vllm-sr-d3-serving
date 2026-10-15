@@ -33,6 +33,11 @@
 #   VLLM_SRUN_FP8              1 = hold the large linear layers as FP8 (e4m3, per-channel weight scales, per-token
 #                              activation scales): ~1.9x faster GEMMs and ~7 GiB less memory, with quantization
 #                              error. Validate on your data first. See launcher/fp8_linear.py.
+#   VLLM_SRUN_UNIFIED_MEMORY   1 (default) = on a host whose GPU shares the CPU's memory pool (DGX Spark), count
+#                              reclaimable page cache as free GPU memory and drop the checkpoint files from the cache
+#                              before the device copy. Without it the runtime reads MemFree, which a full page cache
+#                              drives under 1 GiB, and refuses the model ("needs about 19.2 GiB, 0.6 GiB free").
+#                              0 = stock behaviour. Discrete GPUs are unaffected. See launcher/unified_memory.py.
 #   VLLM_SRUN_MEMORY_BUDGET_GIB  refuse to load a model whose estimated size exceeds this (unset = off).
 #   VLLM_SRUN_AUTOTUNE_DIR     subdirectory of the cache dir where Triton autotuning and compiled kernels are
 #                              kept between runs (default autotune): a restart skips the tuning pause and
@@ -46,7 +51,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODEL="${1:-vllm-sr/d3-flash}"
 PORT="${2:-8000}"
 # Tagged by content, so an edited Dockerfile or launcher is rebuilt instead of served from a stale image
-IMAGE="vllm-srun-d3:$(cat "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR/launcher/d3_launcher.py" "$SCRIPT_DIR/launcher/fp8_linear.py" | sha256sum | cut -c1-12)"
+IMAGE="vllm-srun-d3:$(cat "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR/launcher/d3_launcher.py" "$SCRIPT_DIR/launcher/fp8_linear.py" "$SCRIPT_DIR/launcher/unified_memory.py" | sha256sum | cut -c1-12)"
 CACHE_DIR="${VLLM_SRUN_CACHE_DIR:-$HOME/.cache/vllm-srun}"
 MAX_NUM_BATCHED_TOKENS="${VLLM_SRUN_MAX_NUM_BATCHED_TOKENS:-16384}"
 MAX_NUM_SEQS="${VLLM_SRUN_MAX_NUM_SEQS:-1}"
@@ -56,6 +61,7 @@ MEMORY_BUDGET_GIB="${VLLM_SRUN_MEMORY_BUDGET_GIB:-}"
 AUTOTUNE_DIR="${VLLM_SRUN_AUTOTUNE_DIR:-autotune}"
 FUSED_KERNELS="${VLLM_SRUN_FUSED_KERNELS:-1}"
 FP8="${VLLM_SRUN_FP8:-0}"
+UNIFIED_MEMORY="${VLLM_SRUN_UNIFIED_MEMORY:-1}"
 
 SERVE_ARGS=(
     --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS"
@@ -91,6 +97,7 @@ docker run --rm -it --gpus all --ipc=host -p "$PORT":8100 \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
     -e VLLM_SRUN_FUSED_KERNELS="$FUSED_KERNELS" \
     -e VLLM_SRUN_FP8="$FP8" \
+    -e VLLM_SRUN_UNIFIED_MEMORY="$UNIFIED_MEMORY" \
     -v "$CACHE_DIR":/models \
     "$IMAGE" \
     serve "$MODEL" \

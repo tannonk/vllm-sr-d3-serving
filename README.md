@@ -99,6 +99,7 @@ All are environment variables read by `serve.sh` (header of the script lists the
 
 | Variable | Default | Effect |
 | --- | --- | --- |
+| `VLLM_SRUN_UNIFIED_MEMORY` | `1` | On hosts whose GPU shares the CPU's memory pool (DGX Spark), count reclaimable page cache as free GPU memory; see [Troubleshooting](#troubleshooting) |
 | `VLLM_SRUN_FUSED_KERNELS` | `1` | Run the accelerator's fused Triton kernels (+35%; BF16 rounding differences only) |
 | `VLLM_SRUN_FP8` | `0` | Hold the large linear layers as FP8 e4m3 (+~1.4x, ~7 GiB less memory, near-tie flips) |
 | `VLLM_SRUN_MAX_NUM_SEQS` | `1` | Rows per forward; `1` runs every row alone |
@@ -118,6 +119,7 @@ serve.sh                builds the image (tagged by content), runs it with the f
 launcher/d3_launcher.py entrypoint: wraps the runtime at start-up, no source patching
 launcher/fp8_linear.py  Fp8Linear (per-channel weight scales, per-token activation scales, torch._scaled_mm,
                         single-pass Triton quantiser) and convert_linears()
+launcher/unified_memory.py  MemAvailable-based free-memory probe and page-cache eviction for shared CPU/GPU pools
 benchmarks/             server_window.py, profile_forward.py, fp8_gemm_check.py
 tests/                  CPU unit tests of the launcher, the FP8 layer and the window arithmetic
 results/                the benchmark record and raw /metrics windows
@@ -127,6 +129,9 @@ What the launcher does at start-up:
 
 - **Always:** if `torch.nn.attention.varlen.varlen_attn` has no `scale` / `enable_gqa` parameters, it removes the
   runtime's variable-length attention kernel so merged batches are padded instead of crashing.
+- **`VLLM_SRUN_UNIFIED_MEMORY=1` (default):** wraps `GPUAccelerator.devices` so a GPU that shares the host's memory pool
+  reports `MemAvailable` as its free memory, and wraps `NativeEngine._place` so the checkpoint files are dropped from the
+  page cache before the device copy. Discrete GPUs are left alone.
 - **`VLLM_SRUN_FUSED_KERNELS=1`:** wraps `Decision3Family.describe` so the model's `DtypePolicy` consents to the
   accelerator's approximate kernels. This needs the compiled `causal-conv1d` (the runtime registers the fused
   `gdn_prep` only with it; otherwise the receipt reads `fused_skipped: kernels missing: ['gdn_prep']`).
@@ -135,7 +140,18 @@ What the launcher does at start-up:
   runtime checks the loaded parameter count against the package manifest.
 
 The launcher patches internals of the pinned commit. Re-check `Decision3Family.describe`,
-`GPUAccelerator.kernels` and `NativeEngine._place` when bumping `SEMANTIC_ROUTER_REF` in the Dockerfile.
+`GPUAccelerator.kernels`, `GPUAccelerator.devices` and `NativeEngine._place` when bumping `SEMANTIC_ROUTER_REF` in the Dockerfile.
+
+## Troubleshooting
+
+**`PlacementError: no device can serve d3-flash: cuda:0: d3-flash needs about 19.2 GiB, 0.6 GiB free`, retried forever,
+while `htop` shows free memory.** The DGX Spark's CPU and GPU share one pool, and `torch.cuda.mem_get_info` reports
+`MemFree`, which excludes the page cache. After enough file reads the cache holds almost the whole pool
+(`grep -E 'MemFree|MemAvailable|^Cached' /proc/meminfo`: `MemFree` under 1 GiB, `MemAvailable` ~115 GiB). The kernel
+hands the cache back as soon as the GPU allocates, so the model fits; only the runtime's pre-check refuses. The launcher
+fixes this by default (`VLLM_SRUN_UNIFIED_MEMORY=1`). If you see the error with a build that predates it, or with
+`VLLM_SRUN_UNIFIED_MEMORY=0`, `sync; echo 1 | sudo tee /proc/sys/vm/drop_caches` is a temporary workaround. Why it is
+done this way: [`docs/adr/0001-unified-memory-free-probe.md`](docs/adr/0001-unified-memory-free-probe.md).
 
 ## Reproducing the numbers
 
@@ -173,7 +189,7 @@ with each configuration and comparing per-person probabilities and gold role acc
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                      # 32 tests, CPU only; the one Triton test is skipped without CUDA
+pytest                      # 51 tests, CPU only; the one Triton test is skipped without CUDA
 ruff check .
 ```
 

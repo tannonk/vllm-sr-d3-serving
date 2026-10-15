@@ -23,8 +23,15 @@ Always applied (a compatibility fix, not a switch):
   several clients ran). The launcher drops that kernel when the installed signature does not match, so
   merged batches are padded instead, which is what the runtime does where no such kernel exists.
 
-Switches (environment variables, all off unless set to 1/true/yes/on):
+* On a host whose GPU shares the CPU's memory pool (DGX Spark) ``torch.cuda.mem_get_info`` reports ``MemFree``,
+  which leaves out the page cache. Once the cache has filled the pool, the runtime's placement check refuses the
+  model (``d3-flash needs about 19.2 GiB, 0.6 GiB free``) and retries forever. The launcher makes shared-pool
+  devices report ``MemAvailable`` and drops the checkpoint files from the cache before the device copy
+  (``unified_memory.py``). Discrete GPUs are untouched. ``VLLM_SRUN_UNIFIED_MEMORY=0`` turns it off.
 
+Switches (environment variables, off unless set to 1/true/yes/on, except where a default is stated):
+
+``VLLM_SRUN_UNIFIED_MEMORY`` (default on) placement counts reclaimable page cache as free on shared-pool hosts.
 ``VLLM_SRUN_FUSED_KERNELS``  let the d3 model run the accelerator's fused approximate kernels.
 ``VLLM_SRUN_FP8``            hold the backbone's large linear layers as FP8 (e4m3) with per-channel weight
                              and per-token activation scales (``fp8_linear.py``): ~1.9x faster GEMMs on a
@@ -48,6 +55,7 @@ LOGGER = logging.getLogger("vllm_srun.d3_launcher")
 
 FUSED_KERNELS_VARIABLE = "VLLM_SRUN_FUSED_KERNELS"
 FP8_VARIABLE = "VLLM_SRUN_FP8"
+UNIFIED_MEMORY_VARIABLE = "VLLM_SRUN_UNIFIED_MEMORY"
 TRUTHY = {"1", "true", "yes", "on"}
 # What the runtime's `_wrap_varlen` passes to PyTorch's variable-length attention.
 VARLEN_KEYWORDS = frozenset({"scale", "enable_gqa"})
@@ -57,9 +65,11 @@ VARLEN_SOURCE = "torch-varlen-attention"
 SpecT = TypeVar("SpecT")
 
 
-def switch_enabled(environment: Mapping[str, str], variable: str) -> bool:
-    """Whether ``variable`` is set to a true value in ``environment``."""
-    return environment.get(variable, "").strip().lower() in TRUTHY
+def switch_enabled(environment: Mapping[str, str], variable: str, default: bool = False) -> bool:
+    """Whether ``variable`` is set to a true value in ``environment``; ``default`` applies when it is not set at all."""
+    if variable not in environment:
+        return default
+    return environment[variable].strip().lower() in TRUTHY
 
 
 def consent_to_approximate_kernels(spec: SpecT) -> SpecT:
@@ -129,6 +139,15 @@ def apply_patches(environment: Mapping[str, str]) -> list[str]:
 
         GPUAccelerator.kernels = without_varlen_attention(GPUAccelerator.kernels)  # type: ignore[method-assign]
         applied.append("no packed forwards (torch varlen_attn takes no scale/enable_gqa)")
+    if switch_enabled(environment, UNIFIED_MEMORY_VARIABLE, default=True):
+        from unified_memory import devices_with_reclaimable_memory, place_after_evicting_checkpoints
+        from vllm_srun.accel.gpu import GPUAccelerator
+        from vllm_srun.engines.native.engine import NativeEngine
+
+        GPUAccelerator.devices = devices_with_reclaimable_memory(GPUAccelerator.devices)  # type: ignore[method-assign]
+        # Installed before the FP8 wrapper below, so that one stays the outermost `_place`.
+        NativeEngine._place = place_after_evicting_checkpoints(NativeEngine._place)  # type: ignore[method-assign]
+        applied.append("reclaimable page cache counts as free memory")
     if switch_enabled(environment, FUSED_KERNELS_VARIABLE):
         from vllm_srun.families.decision3.family import Decision3Family
 
